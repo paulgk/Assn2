@@ -61,34 +61,119 @@ def record_decision(customer, decision, risk, rate, pr_status):
     except Exception as e:
         logger.error(f"Decision save error: {e}")
 
+# ---------------------------------------------------------
+# Utility: Clean string values
+# ---------------------------------------------------------
+def clean_str(value, default="Unknown"):
+    """Return safe, trimmed string without NaN/None."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except:
+        pass
+
+    value = str(value).strip()
+    if value.lower() in ("nan", "none", ""):
+        return default
+    return value
+
 
 # ---------------------------------------------------------
-# Load Customer Data
+# Load Customer Data (FINAL FIXED VERSION)
 # ---------------------------------------------------------
 def load_customer_data(customer_input: str):
-    """Load and merge customer data from CSV files."""
-    try:
-        credit = pd.read_csv("data/credit_scores.csv")
-        account = pd.read_csv("data/account_status.csv")
-        pr = pd.read_csv("data/pr_status.csv")
+    """
+    Load customer info from 3 independent CSV files:
+    - credit_scores.csv       (ID,Name,Email,CreditScore)
+    - account_status.csv      (ID,Name,Nationality,Email,AccountStatus)
+    - pr_status.csv           (ID,Name,Email,PRStatus)
 
-        for df in (credit, account, pr):
+    Search by ID or Name.
+    """
+    try:
+        # Load CSVs
+        credit_df = pd.read_csv("data/credit_scores.csv")
+        account_df = pd.read_csv("data/account_status.csv")
+        pr_df = pd.read_csv("data/pr_status.csv")
+
+        # Ensure ID is string
+        for df in (credit_df, account_df, pr_df):
             df["ID"] = df["ID"].astype(str)
 
+        # -----------------------
+        # Search: ID OR Name
+        # -----------------------
         if customer_input.isdigit():
-            row = credit[credit["ID"] == customer_input]
+            row_credit = credit_df[credit_df["ID"] == customer_input]
         else:
-            row = credit[credit["Name"].str.lower() == customer_input.lower()]
+            name_lower = customer_input.lower()
+            matches = credit_df[credit_df["Name"].str.lower() == name_lower]
 
-        if row.empty:
+            if len(matches) > 1:
+                return {
+                    "error": (
+                        f"Multiple customers found for name '{customer_input}'. "
+                        "Please provide a unique ID."
+                    )
+                }
+            row_credit = matches
+
+        if row_credit.empty:
             return None
 
-        merged = row.merge(account, on="ID", how="left").merge(pr, on="ID", how="left")
-        return merged.to_dict(orient="records")[0]
+        row_credit = row_credit.iloc[0]
+        customer_id = clean_str(row_credit["ID"])
+
+        # -----------------------
+        # Account Status Lookup
+        # -----------------------
+        row_account = account_df[account_df["ID"] == customer_id]
+        if row_account.empty:
+            return {"error": f"Account status missing for ID {customer_id}"}
+        row_account = row_account.iloc[0]
+
+        nationality_value = clean_str(row_account.get("Nationality"))
+
+        # -----------------------
+        # PR Lookup Logic
+        # -----------------------
+        if nationality_value.lower() != "singaporean":
+            # Non-Singaporean → PR REQUIRED
+            row_pr = pr_df[pr_df["ID"] == customer_id]
+            if row_pr.empty:
+                return {
+                    "error": (
+                        f"PR status is required for non-Singaporean ID {customer_id}, "
+                        "but PR record is missing."
+                    )
+                }
+            row_pr = row_pr.iloc[0]
+            pr_status = clean_str(row_pr.get("PRStatus"))
+        else:
+            # Singaporean → PR NOT NEEDED
+            pr_status = "Not Required"
+
+        # -----------------------
+        # Build Final Customer Object
+        # -----------------------
+        customer = {
+            "ID": customer_id,
+            "Name": clean_str(row_credit.get("Name")),
+            "Email": clean_str(row_credit.get("Email")),
+            "Nationality": nationality_value,
+            "CreditScore": row_credit.get("CreditScore"),
+            "AccountStatus": clean_str(row_account.get("AccountStatus")),
+            "PRStatus": pr_status,
+        }
+
+        return customer
 
     except Exception as e:
         logger.error(f"Customer load error: {e}")
         return None
+
 
 
 # ---------------------------------------------------------
