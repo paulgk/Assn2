@@ -1,0 +1,29 @@
+{
+  "4444": {
+    "name": "Andy",
+    "nationality": "Non-Singaporean",
+    "pr_status": false,
+    "decision": "rejected",
+    "risk": "High Risk",
+    "rate": null,
+    "timestamp": "2025-12-09T16:36:08.709775"
+  },
+  "1111": {
+    "name": NaN,
+    "nationality": "Singaporean",
+    "pr_status": "null",
+    "decision": "approved",
+    "risk": "Medium Risk",
+    "rate": "4.885%",
+    "timestamp": "2025-12-09T16:14:22.555954"
+  },
+  "6666": {
+    "name": "Brenda Palmer",
+    "nationality": "Non-Singaporean",
+    "pr_status": "true",
+    "decision": "rejected",
+    "risk": "High Risk",
+    "rate": "4.885%",
+    "timestamp": "2025-12-09T16:34:37.754793"
+  }
+}
