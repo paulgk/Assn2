@@ -12,6 +12,15 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # loads .env automatically
+
+if not os.getenv("OPENAI_API_KEY"):
+    raise RuntimeError("Missing OPENAI_API_KEY in environment or .env file.")
+
+
 
 # ---------------------------------------------------------
 # Logging
