@@ -99,60 +99,65 @@ def save_officer_decision(choice):
 # -----------------------------------------------------------
 # MAIN UI
 # -----------------------------------------------------------
-st.title("🏦 Loan Evaluation Dashboard")
-st.write("Evaluate a customer's loan eligibility using AI + officer review.")
+st.set_page_config(page_title="Loan Dashboard", layout="wide")
+
+st.title("🏦 Loan Evaluation")
+st.write("One Stop page for Loan applications and Questions.")
 
 st.divider()
-st.subheader("💬 Loan Approval Process")
+col_left, col_right = st.columns([1, 1])
 
-customer_input = st.text_input("🔍 Enter Customer ID or Name")
 
-colA, colB = st.columns([1,0.4])
-with colA:
+# -----------------------------------------------------------
+# Loan question section (runs independently of evaluation)
+# -----------------------------------------------------------
+
+with col_left:
+
+    st.subheader("💬 Loan Approval Process")
+
+    customer_input = st.text_input("🔍 Enter Customer ID or Name")
+
     if st.button("Evaluate Loan", use_container_width=True):
         if not customer_input.strip():
             st.warning("Please enter a valid name or ID.")
         else:
             evaluate_customer(customer_input)
+with col_right:
 
-# -----------------------------------------------------------
-# Loan question section (runs independently of evaluation)
-# -----------------------------------------------------------
-st.divider()
-st.subheader("💬 Ask a Loan Question")
+    st.subheader("💬 Ask a Loan Question")
 
-question_text = st.text_input(
-    "Ask a loan-related question about a single customer (use their exact name or ID):",
-    key="loan_question_input",
-)
+    question_text = st.text_input(
+        "Ask a loan-related question about a single customer (use their exact name or ID):",
+        key="loan_question_input",
+    )
 
-col_q1, col_q2 = st.columns([1, 0.4])
-with col_q1:
+
     if st.button("Ask Question", use_container_width=True):
         if not question_text.strip():
             st.warning("Please enter a question first.")
         else:
             ask_loan_question(question_text)
 
-# Show the latest QA result, if any
-qa_result = st.session_state.get("loan_qa")
+    # Show the latest QA result, if any
+    qa_result = st.session_state.get("loan_qa")
 
-if qa_result:
-    st.markdown("### 🤖 AI Answer")
-    if qa_result.get("answer"):
-        st.write(qa_result["answer"])
+    if qa_result:
+        st.markdown("### 🤖 AI Answer")
+        if qa_result.get("answer"):
+            st.write(qa_result["answer"])
 
-    # Friendly handling when there is an error
-    if qa_result.get("error") and not qa_result.get("answer"):
-        st.info(
-            "I couldn't fully answer that question. "
-            f"Details: {qa_result.get('error')}"
-        )
+        # Friendly handling when there is an error
+        if qa_result.get("error") and not qa_result.get("answer"):
+            st.info(
+                "I couldn't fully answer that question. "
+                f"Details: {qa_result.get('error')}"
+            )
 
-    # Structured JSON context (if available) — your Option C
-    if qa_result.get("context"):
-        with st.expander("📦 See evaluated loan details (JSON)", expanded=False):
-            st.json(qa_result["context"])
+        # Structured JSON context (if available) — your Option C
+        if qa_result.get("context"):
+            with st.expander("📦 See evaluated loan details (JSON)", expanded=False):
+                st.json(qa_result["context"])
 
 
 # -----------------------------------------------------------
