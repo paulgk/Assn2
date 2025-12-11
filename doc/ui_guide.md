@@ -21,6 +21,7 @@
 | AI Assessment | Risk, recommendation, interest rate, PR status used | `render_info_card(..., accent=True)` |
 | Policy Evidence | Text block summarizing what RAG returned | `render_text_card` |
 | Memo | Markdown-safe block inside an expander | Streamlit expander + `memo-box` |
+| Decision Stats | Sidebar metrics plus approval-rate progress bar refreshed after each recorded decision | `render_decision_stats_sidebar` |
 | Decision Panel | Radio buttons, justification textarea, submit button | Main column bottom |
 
 ## 4. Accessibility
@@ -39,5 +40,5 @@
 2. Expand memo for long-form rationale if needed.
 3. Select decision (defaults to AI recommendation).
 4. Provide justification text.
-5. Click `Record Final Decision` to log outcome and update sidebar metrics.
-
+5. Click `Record Final Decision` to log outcome, refresh sidebar metrics, and emit success/error styling aligned to the officer choice.
+6. Review the echoed justification and serialized application block (`st.json`) if notes need to be copied elsewhere.

@@ -18,24 +18,29 @@ graph TD
 - **Interaction layer**: Streamlit provides cards, memo expander, sidebar metrics, and officer decision controls.
 - **Intelligence layer**: A single CrewAI agent uses `CustomerDataLookup` and `PolicyRetriever` tools to ground all statements.
 - **Evidence requirements**: Non-Singaporeans must surface PR status; every loan recommendation must cite risk and interest-rate guidance pulled from policy PDFs.
+- **Caching**: Prompt templates, CSV slices, and the FAISS index are memoized (`lru_cache` + global store) so each Streamlit rerun reuses the same in-memory assets.
 
 ## 3. Functional Blocks
 1. **User Input & Validation**
    - Textarea captures loan questions or application requests.
    - Empty inputs are rejected immediately.
 2. **Data Access**
-   - `load_customer_data` stitches together the necessary CSV rows without merging tables.
+   - `_load_customer_tables` and `load_prompt` use `lru_cache` so CSV slices and prompts are read once per session.
+   - `load_customer_data` stitches together the necessary CSV rows without merging tables and supports both ID and exact-name lookups via a precomputed lowercase column.
    - Errors (missing credit, PR status, etc.) short-circuit the flow.
 3. **Policy Retrieval (RAG)**
    - PDFs in `/policies` → `PyPDFLoader` → chunked via `RecursiveCharacterTextSplitter` → embedded with `SentenceTransformerEmbeddings` → FAISS index.
    - Cached in-memory for session reuse.
 4. **Unified LLM Pipeline**
    - Prompt defined in `prompts/unified_agent.md` enforces JSON schema and compliance rules.
-   - `run_unified_pipeline` orchestrates CrewAI and normalizes outputs, rejecting responses without policy evidence.
+   - `run_unified_pipeline` orchestrates CrewAI, `safe_json_loads` unwraps fenced JSON, and `normalize_loan_response` enforces policy notes, risk tiers, and interest-rate presence before handing control to the UI.
 5. **UI Rendering**
    - Customer and assessment cards highlight key facts.
    - Memo expander wraps the AI letter in a dashed box.
    - Officer dashboard (sidebar + decision form) records final approvals/rejections and justification text.
+6. **Decision Stats & Audit Trail**
+   - `render_decision_stats_sidebar` keeps approval/rejection counts plus a live approval-rate progress bar in sync with session state.
+   - Recording a decision echoes the justification and serialized application payload (`st.json`) for quick copy/paste into downstream systems.
 
 ## 4. Data Sources
 | File | Columns (post redaction) | Purpose |

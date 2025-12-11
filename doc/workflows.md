@@ -49,7 +49,7 @@ graph LR
 | `pending_application` | Cached AI evaluation awaiting officer action | `None` until loan response | 
 | `officer_decision` | Radio selection (`Approve` / `Reject`) | Pre-populated with AI suggestion |
 | `officer_reason` | Free-text justification | Blank for each new evaluation |
-| `decision_stats` | Dict with aggregated approvals/rejections | `{approved: 0, rejected: 0}` |
+| `decision_stats` | Dict with aggregated approvals/rejections (feeds sidebar metrics + approval-rate bar) | `{approved: 0, rejected: 0}` |
 
 ## 4. Officer Approval Checklist
 1. Review **Customer Snapshot** card.
@@ -57,7 +57,7 @@ graph LR
 3. Expand **AI Draft Letter** if more context is needed.
 4. Select `Approve` or `Reject` in the decision radio buttons.
 5. Provide a justification in the textarea (required for compliance).
-6. Click **Record Final Decision** to log outcome and reset UI.
+6. Click **Record Final Decision** to log outcome, refresh sidebar stats, and emit the JSON snapshot + justification for auditing.
 
 ## 5. Error Handling Signals
 | Error Code | Trigger | Surface |
@@ -67,3 +67,6 @@ graph LR
 | `llm_output_parse_error` | Agent returns malformed JSON | Streamlit error |
 | `policy_evidence_missing` | LLM omitted policy-based risk/interest | Streamlit error prompting re-run |
 
+## 6. Post-Decision Logging
+- Successful submissions display either `st.success` (approve) or `st.error` (reject), echo the officer's justification, and dump the evaluated payload via `st.json` for easy copy/paste into downstream audit tooling.
+- After logging, `pending_application` resets to `None` and `render_decision_stats_sidebar` reruns so the sidebar immediately reflects the new totals.
