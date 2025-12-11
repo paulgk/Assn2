@@ -1,4 +1,70 @@
 """Core loan assistant logic backed by CrewAI and FAISS-powered policy RAG."""
+# windows_patch.py
+"""
+Windows compatibility patch for CrewAI.
+
+This safely:
+- Disables CrewAI telemetry (which causes signal issues on Windows)
+- Adds missing Unix-only signals (SIGHUP, SIGTSTP, SIGQUIT, SIGCONT)
+- Prevents CrewAI from registering signals in non-main threads
+- Does nothing on Linux/macOS (safe for cross-platform use)
+
+Usage:
+    import windows_patch
+"""
+
+import os
+import sys
+import signal
+
+# ---------------------------------------------------------
+# 1. Only apply patches on Windows
+# ---------------------------------------------------------
+if sys.platform != "win32":
+    # On Linux/MacOS, do nothing — signals work normally
+    pass
+else:
+    # ---------------------------------------------------------
+    # Disable CrewAI telemetry (root cause of most signal issues)
+    # ---------------------------------------------------------
+    os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+    os.environ["CREWAI_DISABLE_TRACKING"] = "true"
+    os.environ["OTEL_SDK_DISABLED"] = "true"
+
+    # ---------------------------------------------------------
+    # Add missing Unix signals so imports don't fail
+    # ---------------------------------------------------------
+    fallback = signal.SIGTERM  # safe substitute
+
+    for sig_name in ("SIGHUP", "SIGTSTP", "SIGQUIT", "SIGCONT"):
+        if not hasattr(signal, sig_name):
+            setattr(signal, sig_name, fallback)
+
+    # ---------------------------------------------------------
+    # Patch CrewAI telemetry to avoid registering signals
+    # in non-main threads (Streamlit / FastAPI)
+    # ---------------------------------------------------------
+    try:
+        from crewai.telemetry.telemetry import Telemetry
+        import threading
+
+        original = Telemetry._register_signal_handler
+
+        def safe_register(self, sig, handler):
+            # Only allow signal registration in the main thread
+            if threading.current_thread() is not threading.main_thread():
+                return
+            try:
+                return original(self, sig, handler)
+            except ValueError:
+                # Ignore "signal only works in main thread" errors
+                return
+
+        Telemetry._register_signal_handler = safe_register
+
+    except Exception:
+        # If CrewAI internals change, fail silently
+        pass
 
 import json
 import logging
@@ -8,12 +74,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import logging
+import os
+import json
+from datetime import datetime
+
+import pandas as pd
+
 from crewai import Agent, Crew, Task
 from crewai.tools import tool
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ===========================================================
@@ -27,7 +101,8 @@ if not os.getenv("OPENAI_API_KEY"):
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", 
+    force=True
 )
 logger = logging.getLogger("loan_agents")
 
@@ -38,6 +113,26 @@ POLICY_DIR = BASE_DIR / "policies"
 
 # Cache for the FAISS policy database so Streamlit sessions do not rebuild it
 _POLICY_DB: Optional[FAISS] = None
+
+def _coerce_float(value: str, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+@lru_cache(maxsize=1)
+def get_llm() -> ChatOpenAI:
+    """Return a configured ChatOpenAI client shared across CrewAI runs."""
+    model = (
+        os.getenv("LOAN_LLM_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    )
+    temperature = _coerce_float(os.getenv("LOAN_LLM_TEMPERATURE", "0.1"), 0.1)
+    # Clip to OpenAI's supported range so bad env values don't break the app.
+    temperature = 0.2
+    return ChatOpenAI(model=model, temperature=temperature)
 
 
 # ===========================================================
@@ -358,6 +453,7 @@ def run_unified_pipeline(user_text: str, tools: List[Any]) -> Dict[str, Any]:
     prompt = load_prompt("unified_agent.md").strip()
     if not prompt:
         prompt = "You are a cautious loan assistant. Always return valid JSON as instructed."
+    llm = get_llm()
 
     # Single agent keeps reasoning consistent and avoids sync issues.
     agent = Agent(
@@ -365,6 +461,7 @@ def run_unified_pipeline(user_text: str, tools: List[Any]) -> Dict[str, Any]:
         goal=prompt,
         backstory=prompt,
         tools=tools,
+        llm=llm,
         allow_delegation=False,
     )
 
