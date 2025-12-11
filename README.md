@@ -28,7 +28,7 @@ Assn2/
 Install dependencies inside your virtual environment:
 
 ```bash
-pip install streamlit crewai langchain langchain-community sentence-transformers faiss-cpu python-dotenv pytest
+pip install streamlit crewai langchain langchain-community langchain-openai sentence-transformers faiss-cpu python-dotenv pytest
 ```
 
 ## Configuration
@@ -38,6 +38,9 @@ pip install streamlit crewai langchain langchain-community sentence-transformers
    ```
 2. CSV files in `data/` must include the columns used by `load_customer_data` (`ID`, `Name`, `Email`, `Nationality`, `AccountStatus`, etc.).
 3. Place any additional policy PDFs in `policies/`. They will be indexed the next time the app starts.
+4. Optional overrides:
+   - `LOAN_LLM_MODEL` – model name passed to `ChatOpenAI` (defaults to `gpt-4o-mini`).
+   - `LOAN_LLM_TEMPERATURE` – float between 0 and 2 controlling generation temperature (defaults to `0.1`).
 
 > **Note:** Because CSVs, prompts, and policies are cached with `functools.lru_cache`, restart Streamlit after changing those files.
 
