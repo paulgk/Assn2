@@ -1,17 +1,93 @@
 """Core loan assistant logic backed by CrewAI and FAISS-powered policy RAG."""
+# windows_patch.py
+"""
+Windows compatibility patch for CrewAI.
+
+This safely:
+- Disables CrewAI telemetry (which causes signal issues on Windows)
+- Adds missing Unix-only signals (SIGHUP, SIGTSTP, SIGQUIT, SIGCONT)
+- Prevents CrewAI from registering signals in non-main threads
+- Does nothing on Linux/macOS (safe for cross-platform use)
+
+Usage:
+    import windows_patch
+"""
+
+import os
+import sys
+import signal
+
+# ---------------------------------------------------------
+# 1. Only apply patches on Windows
+# ---------------------------------------------------------
+if sys.platform != "win32":
+    # On Linux/MacOS, do nothing — signals work normally
+    pass
+else:
+    # ---------------------------------------------------------
+    # Disable CrewAI telemetry (root cause of most signal issues)
+    # ---------------------------------------------------------
+    os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+    os.environ["CREWAI_DISABLE_TRACKING"] = "true"
+    os.environ["OTEL_SDK_DISABLED"] = "true"
+
+    # ---------------------------------------------------------
+    # Add missing Unix signals so imports don't fail
+    # ---------------------------------------------------------
+    fallback = signal.SIGTERM  # safe substitute
+
+    for sig_name in ("SIGHUP", "SIGTSTP", "SIGQUIT", "SIGCONT"):
+        if not hasattr(signal, sig_name):
+            setattr(signal, sig_name, fallback)
+
+    # ---------------------------------------------------------
+    # Patch CrewAI telemetry to avoid registering signals
+    # in non-main threads (Streamlit / FastAPI)
+    # ---------------------------------------------------------
+    try:
+        from crewai.telemetry.telemetry import Telemetry
+        import threading
+
+        original = Telemetry._register_signal_handler
+
+        def safe_register(self, sig, handler):
+            # Only allow signal registration in the main thread
+            if threading.current_thread() is not threading.main_thread():
+                return
+            try:
+                return original(self, sig, handler)
+            except ValueError:
+                # Ignore "signal only works in main thread" errors
+                return
+
+        Telemetry._register_signal_handler = safe_register
+
+    except Exception:
+        # If CrewAI internals change, fail silently
+        pass
 
 import json
 import logging
 import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import logging
+import os
+import json
+from datetime import datetime
+
+import pandas as pd
+
 from crewai import Agent, Crew, Task
 from crewai.tools import tool
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ===========================================================
@@ -23,20 +99,44 @@ load_dotenv()
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("Missing OPENAI_API_KEY in environment or .env file.")
 
+LOG_FILE = os.getenv("LOAN_AGENT_LOG_PATH", "loan_agents.log")
+log_handlers: List[logging.Handler] = [logging.StreamHandler()]
+
+try:
+    log_handlers.append(logging.FileHandler(LOG_FILE))
+except OSError as err:
+    print(f"[loan_agents] Unable to open log file '{LOG_FILE}': {err}", file=sys.stderr)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=log_handlers,
 )
 logger = logging.getLogger("loan_agents")
 
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+PROMPTS_DIR = BASE_DIR / "prompts"
+POLICY_DIR = BASE_DIR / "policies"
+
 # Cache for the FAISS policy database so Streamlit sessions do not rebuild it
 _POLICY_DB: Optional[FAISS] = None
-
 
 # ===========================================================
 # Prompt loading helper
 # ===========================================================
 
+
+def error_response(error: str, message: str) -> Dict[str, str]:
+    """Standardized error payload for the UI."""
+    return {
+        "type": "error",
+        "error": error,
+        "message": message,
+    }
+
+@lru_cache(maxsize=8)
 def load_prompt(filename: str) -> str:
     """Load a prompt template from prompts/<filename>."""
     try:
@@ -53,6 +153,18 @@ def load_prompt(filename: str) -> str:
 # Data loading utilities
 # ===========================================================
 
+@lru_cache(maxsize=1)
+def _load_customer_tables():
+    """Read customer CSV slices once per session."""
+    credit_df = pd.read_csv(DATA_DIR / "credit_scores.csv", dtype={"ID": str})
+    account_df = pd.read_csv(DATA_DIR / "account_status.csv", dtype={"ID": str})
+    pr_df = pd.read_csv(DATA_DIR / "pr_status.csv", dtype={"ID": str})
+    account_df["__name_lower"] = (
+        account_df["Name"].fillna("").str.strip().str.lower()
+    )
+    return credit_df, account_df, pr_df
+
+
 def clean_str(value: Any, default: str = "Unknown") -> str:
     """Safely convert arbitrary values to a trimmed string."""
     if pd.isna(value):
@@ -63,80 +175,65 @@ def clean_str(value: Any, default: str = "Unknown") -> str:
 
 def load_customer_data(customer_input: str) -> Optional[Dict[str, Any]]:
     """Return a unified customer object from CSV slices without merging tables."""
+    query = str(customer_input or "").strip()
+    if not query:
+        return {"error": "Customer identifier cannot be empty."}
+
     try:
-        credit_df = pd.read_csv("data/credit_scores.csv")
-        account_df = pd.read_csv("data/account_status.csv")
-        pr_df = pd.read_csv("data/pr_status.csv")
-
-        # Normalize all IDs up front so cross-file joins stay reliable.
-        for df in (credit_df, account_df, pr_df):
-            df["ID"] = df["ID"].astype(str)
-
-        # Pre-compute lowercase names once for safe comparisons
-        account_df["__name_lower"] = (
-            account_df["Name"].fillna("").str.strip().str.lower()
-        )
-        query = str(customer_input or "").strip()
-        if not query:
-            return {"error": "Customer identifier cannot be empty."}
-
-        is_id = query.isdigit()
-        account_rows: pd.DataFrame
-
-        if is_id:
-            account_rows = account_df[account_df["ID"] == query]
-        else:
-            lower = query.lower()
-            account_rows = account_df[account_df["__name_lower"] == lower]
-            if len(account_rows) > 1:
-                return {
-                    "error": (
-                        "Multiple customers share that name. Please provide a unique ID."
-                    )
-                }
-
-        if account_rows.empty:
-            return None
-
-        account_row = account_rows.iloc[0]
-        customer_id = clean_str(account_row.get("ID"))
-        name = clean_str(account_row.get("Name"))
-        email = clean_str(account_row.get("Email"))
-        nationality = clean_str(account_row.get("Nationality"))
-        account_status = clean_str(account_row.get("AccountStatus"))
-
-        credit_row = credit_df[credit_df["ID"] == customer_id]
-        if credit_row.empty:
-            return {"error": f"Credit score missing for ID {customer_id}."}
-        credit_value = credit_row.iloc[0].get("CreditScore")
-        try:
-            credit_score = int(float(credit_value))
-        except (TypeError, ValueError):
-            credit_score = clean_str(credit_value, default="Unknown")
-
-        pr_status = "Not Required"
-        if nationality.lower() != "singaporean":
-            pr_row = pr_df[pr_df["ID"] == customer_id]
-            if pr_row.empty:
-                return {"error": f"PR status missing for ID {customer_id}."}
-            pr_status = clean_str(pr_row.iloc[0].get("PRStatus"))
-
-        return {
-            "ID": customer_id,
-            "Name": name,
-            "Email": email,
-            "Nationality": nationality,
-            "AccountStatus": account_status,
-            "CreditScore": credit_score,
-            "PRStatus": pr_status,
-        }
-
+        credit_df, account_df, pr_df = _load_customer_tables()
     except FileNotFoundError as err:
         logger.exception("CSV file not found")
         return {"error": f"Required data file missing: {err}"}
     except Exception as err:
         logger.exception("Customer load error")
         return {"error": str(err)}
+
+    is_id = query.isdigit()
+    account_rows = (
+        account_df[account_df["ID"] == query]
+        if is_id
+        else account_df[account_df["__name_lower"] == query.lower()]
+    )
+
+    if account_rows.empty:
+        return None
+    if not is_id and len(account_rows) > 1:
+        return {
+            "error": "Multiple customers share that name. Please provide a unique ID."
+        }
+
+    account_row = account_rows.iloc[0]
+    customer_id = clean_str(account_row.get("ID"))
+    name = clean_str(account_row.get("Name"))
+    email = clean_str(account_row.get("Email"))
+    nationality = clean_str(account_row.get("Nationality"))
+    account_status = clean_str(account_row.get("AccountStatus"))
+
+    credit_row = credit_df[credit_df["ID"] == customer_id]
+    if credit_row.empty:
+        return {"error": f"Credit score missing for ID {customer_id}."}
+    credit_value = credit_row.iloc[0].get("CreditScore")
+    try:
+        credit_score = int(float(credit_value))
+    except (TypeError, ValueError):
+        credit_score = clean_str(credit_value, default="Unknown")
+
+    pr_status = "Not Required"
+    if nationality.lower() != "singaporean":
+        pr_row = pr_df[pr_df["ID"] == customer_id]
+        if pr_row.empty:
+            return {"error": f"PR status missing for ID {customer_id}."}
+        pr_status = clean_str(pr_row.iloc[0].get("PRStatus"))
+
+    return {
+        "ID": customer_id,
+        "Name": name,
+        "Email": email,
+        "Nationality": nationality,
+        "AccountStatus": account_status,
+        "CreditScore": credit_score,
+        "PRStatus": pr_status,
+    }
 
 
 # ===========================================================
@@ -146,24 +243,22 @@ def load_customer_data(customer_input: str) -> Optional[Dict[str, Any]]:
 def setup_rag() -> Optional[FAISS]:
     """Build a FAISS index over policy PDFs so the LLM can cite official rules."""
     try:
-        policy_dir = "policies"
         docs = []
 
-        if not os.path.isdir(policy_dir):
+        if not POLICY_DIR.is_dir():
             raise FileNotFoundError(
-                f"Policy directory '{policy_dir}' not found. "
+                f"Policy directory '{POLICY_DIR}' not found. "
                 "Ensure your policy PDFs are placed there."
             )
 
-        for fname in os.listdir(policy_dir):
-            if fname.lower().endswith(".pdf"):
-                path = os.path.join(policy_dir, fname)
-                loader = PyPDFLoader(path)
-                # Each PDF page becomes a LangChain Document used downstream for RAG.
-                docs.extend(loader.load())
-
-        if not docs:
+        pdf_paths = sorted(POLICY_DIR.glob("*.pdf"))
+        if not pdf_paths:
             raise RuntimeError("No policy PDF documents found in 'policies/'.")
+
+        for path in pdf_paths:
+            loader = PyPDFLoader(str(path))
+            # Each PDF page becomes a LangChain Document used downstream for RAG.
+            docs.extend(loader.load())
 
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_documents(docs)
@@ -182,8 +277,26 @@ def get_policy_db() -> Optional[FAISS]:
     """Return (and lazily cache) the FAISS store so every Streamlit run shares it."""
     global _POLICY_DB
     if _POLICY_DB is None:
+        logger.info("Building policy database (FAISS cache miss)...")
         _POLICY_DB = setup_rag()
+        if _POLICY_DB is None:
+            logger.error("Policy database build failed.")
+        else:
+            logger.info("Policy database ready and cached.")
     return _POLICY_DB
+
+
+def warm_policy_cache(force_rebuild: bool = False) -> bool:
+    """
+    Eagerly build the FAISS policy database so the first user request never waits.
+
+    Returns True if the cache exists (after an optional rebuild), otherwise False.
+    """
+    global _POLICY_DB
+    if force_rebuild:
+        _POLICY_DB = None
+    db = get_policy_db()
+    return db is not None
 
 
 def build_policy_tool(policy_db):
@@ -273,13 +386,12 @@ def safe_json_loads(raw: str) -> Optional[Dict[str, Any]]:
 def normalize_loan_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure the response dict matches what the UI expects."""
     FALLBACK = "I don't have the necessary information to answer that."
-
+    logger.debug("HEREEEE Raw agent payload: %s", payload) 
     if not isinstance(payload, dict):
-        return {
-            "type": "error",
-            "error": "llm_payload_invalid",
-            "message": "Loan assistant returned an invalid response.",
-        }
+        return error_response(
+            "llm_payload_invalid",
+            "Loan assistant returned an invalid response.",
+        )
 
     resp_type = payload.get("type", "qa")
 
@@ -304,41 +416,38 @@ def normalize_loan_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             or customer_summary.get("pr_status"),
         }
         letter = payload.get("letter", "")
-
+        logger.debug("HEREEEE Raw agent payload: %s", payload) 
+        logger.debug("HEREEEE Raw agent payload: %s", payload) 
         # Hard guardrails so the UI never displays policy-light loan decisions.
         if not str(assessment_summary["policy_notes"]).strip():
-            return {
-                "type": "error",
-                "error": "policy_evidence_missing",
-                "message": "Policy-backed risk and interest details are required for loan applications.",
-            }
+            return error_response(
+                "policy_evidence_missing",
+                "Policy-backed risk and interest details are required for loan applications.",
+            )
 
         if str(assessment_summary["interest_rate"]).strip().lower() in {"", "unknown", "n/a"}:
-            return {
-                "type": "error",
-                "error": "interest_rate_missing",
-                "message": "Interest rate derived from policy guidance is missing. Please rerun the request.",
-            }
+            return error_response(
+                "interest_rate_missing",
+                "Interest rate derived from policy guidance is missing. Please rerun the request.",
+            )
 
         if str(assessment_summary["risk"]).strip().lower() in {"", "unknown"}:
-            return {
-                "type": "error",
-                "error": "risk_missing",
-                "message": "Risk classification based on policy guidance is missing. Please rerun the request.",
-            }
+            return error_response(
+                "risk_missing",
+                "Risk classification based on policy guidance is missing. Please rerun the request.",
+            )
         return {
             "type": "loan_application",
             "customer": customer_summary,
             "ai_assessment": assessment_summary,
             "letter": letter,
         }
-
+    
     if resp_type == "error":
-        return {
-            "type": "error",
-            "error": payload.get("error", "llm_error"),
-            "message": payload.get("message", "An unknown error occurred."),
-        }
+        return error_response(
+            payload.get("error", "llm_error"),
+            payload.get("message", "An unknown error occurred."),
+        )
 
     # Default to a general QA style response
     answer = payload.get("answer") or FALLBACK
@@ -382,11 +491,10 @@ def run_unified_pipeline(user_text: str, tools: List[Any]) -> Dict[str, Any]:
     parsed = safe_json_loads(raw_output)
     if parsed is None:
         logger.warning("Failed to parse unified agent output: %s", raw_output)
-        return {
-            "type": "error",
-            "error": "llm_output_parse_error",
-            "message": "Unable to parse the model response. Please try again.",
-        }
+        return error_response(
+            "llm_output_parse_error",
+            "Unable to parse the model response. Please try again.",
+        )
 
     return normalize_loan_response(parsed)
 
@@ -400,38 +508,32 @@ def handle_user_input(user_text: str) -> Dict[str, Any]:
     try:
         text = (user_text or "").strip()
         if not text:
-            return {
-                "type": "error",
-                "error": "empty_input",
-                "message": "Please provide a non-empty loan question or request.",
-            }
+            return error_response(
+                "empty_input",
+                "Please provide a non-empty loan question or request.",
+            )
 
         policy_db = get_policy_db()
         if policy_db is None:
-            return {
-                "type": "error",
-                "error": "policy_unavailable",
-                "message": (
-                    "Policy database is unavailable. Ensure the policy PDFs exist and try again."
-                ),
-            }
+            return error_response(
+                "policy_unavailable",
+                "Policy database is unavailable. Ensure the policy PDFs exist and try again.",
+            )
 
         tools = build_customer_and_policy_tools(policy_db)
         response = run_unified_pipeline(text, tools)
 
         if not isinstance(response, dict) or "type" not in response:
-            return {
-                "type": "error",
-                "error": "unexpected_response",
-                "message": "Loan assistant returned an unexpected response.",
-            }
+            return error_response(
+                "unexpected_response",
+                "Loan assistant returned an unexpected response.",
+            )
 
         return response
 
     except Exception as err:
         logger.exception("handle_user_input failed")
-        return {
-            "type": "error",
-            "error": "internal_error",
-            "message": f"An unexpected error occurred: {err}",
-        }
+        return error_response(
+            "internal_error",
+            f"An unexpected error occurred: {err}",
+        )

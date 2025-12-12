@@ -4,13 +4,22 @@ import html
 
 import streamlit as st
 
-from agents import handle_user_input
+from agents import handle_user_input, warm_policy_cache
+
+
+# Prebuild FAISS so the first Streamlit interaction doesn’t block on embeddings.
+POLICY_CACHE_READY = warm_policy_cache()
 
 # ===========================================================
 # Streamlit Page Setup
 # ===========================================================
 
 st.set_page_config(page_title="Loan Assistant", layout="wide")
+
+if not POLICY_CACHE_READY:
+    st.error(
+        "Policy database failed to load. Ensure policy PDFs are present and reload the app."
+    )
 
 # Inject a lightweight design system to modernize Streamlit's default look.
 # Helper renderers and layout utilities
