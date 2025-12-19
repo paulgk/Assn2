@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.pytest_cache
+__pycache__
+*.pyc
+*.log
+loan_agents.log
+.venv
+data
+policies
+doc
+tests/__pycache__

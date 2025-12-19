@@ -67,3 +67,43 @@ pytest
 ```
 
 Use the suite after editing `agents.py`, prompts, or any guardrail logic to ensure the agent contract with the UI stays intact.
+
+## Container usage
+
+Build the CPU-only image (Conda not required inside the container):
+
+```bash
+docker build -t loan-assistant .
+```
+
+Run it while mounting your policies/data folders and injecting env vars:
+
+```bash
+docker run --rm -p 8501:8501 \
+  --env-file .env \
+  -v "$(pwd)/policies:/app/policies" \
+  -v "$(pwd)/data:/app/data" \
+  loan-assistant
+```
+
+- `--env-file .env` passes `OPENAI_API_KEY` (and optional `LOAN_AGENT_LOG_PATH`) without baking secrets into the image.
+- Bind mounts keep your PDFs/CSVs on the host so you can update them without rebuilding.
+- Streamlit listens on `0.0.0.0:8501` inside the container; the `-p 8501:8501` mapping lets you visit http://localhost:8501 from the host browser.
+
+If you want to share the prebuilt image instead of the source tree, export/import it:
+
+```bash
+# Sender
+docker build -t loan-assistant .
+docker save loan-assistant | gzip > loan-assistant.tar.gz
+
+# Receiver
+docker load < loan-assistant.tar.gz
+docker run --rm -p 8501:8501 \
+  --env-file .env \
+  -v "$(pwd)/policies:/app/policies" \
+  -v "$(pwd)/data:/app/data" \
+  loan-assistant
+```
+
+This keeps the environment identical to what you built while avoiding the need to transfer the full repo.
